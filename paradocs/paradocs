@@ -1,0 +1,213 @@
+#!/usr/bin/env python
+
+import argparse
+import sys
+import gzip
+import csv
+
+class Document():
+    def __init__(self, meta, docid, docnum, subdocument_id):
+        self.meta = meta
+        self.subdocument_id = subdocument_id
+        self.lines = []
+        self.docid = docid
+        self.docnum = docnum
+
+    def add(self, raw, meta):
+        self.lines.append((raw, meta))
+
+def is_consecutive(preceding, subsequent):
+    if subsequent["src_start_index"] - preceding["src_end_index"] <= 2 and subsequent["tgt_start_index"] - subsequent["tgt_end_index"] <= 2:
+        return True
+    return False
+
+def breaks_document(args, line):
+    if "None" in [ 
+                    line["src_paragraph_id"],
+                    line["src_sentence_id"],
+                    line["src_start_index"],
+                    line["src_end_index"],
+                    line["src_doc"],
+                    line["tgt_paragraph_id"],
+                    line["tgt_sentence_id"],
+                    line["tgt_start_index"],
+                    line["tgt_end_index"],
+                    line["tgt_doc"]
+                    ]:
+        return True
+    if line["frequency"] >= args.frequency_cutoff:
+        return True
+    return False
+
+def yield_doc(rstream, mstream):
+    document = None
+    docnum = 0
+    subdocument_id = 0
+    for raw, meta in zip(rstream, mstream):
+        docid = " ".join([raw.srcurl, raw.tgturl])
+        if document is None:
+            document = Document(raw, docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+            document.add(raw, meta)
+            docnum += 1
+            subdocument_id += 1
+        elif docid == document.docid:
+            if is_consecutive(document.lines[-1][1], meta):
+                if breaks_document(args, meta):
+                    yield document
+                    document = None
+                    subdocument_id = 0
+                else:
+                    document.add(raw, meta)
+            else:
+                yield document
+                document = Document(raw, docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+                document.add(raw, meta)
+                subdocument_id += 1
+        else:
+            yield document
+            subdocument_id = 0
+            document = Document(raw, docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+            document.add(raw, meta)
+
+            docnum += 1
+            subdocument_id += 1
+    yield document
+
+
+def meets_requirements(doc, args):
+    if len(doc.lines) >= args.minimum_size:
+        return True
+
+def print_doc(doc, args):
+    outfields = args.split(',')
+    for d in doc:
+        out = []
+        for fi in outfields:
+            if fi == "src":
+                out.append(d[0].src)
+            elif fi == "tgt":
+                out.append(d[0].tgt)
+            elif fi == "srcurl":
+                out.append(d[0].srcurl)
+            elif fi == "tgturl":
+                out.append(d[0].tgturl)
+            elif fi == "docid":
+                out.append(d.docnum)
+            elif fi == "subdocid":
+                out.append(d.subdocument_id)
+            elif fi == "collection":
+                out.append(d[0].collection)
+            elif fi == "src_p":
+                out.append(d[1].src_paragraph_id)
+            elif fi == "tgt_p":
+                out.append(d[1].tgt_paragraph_id)
+            elif fi == "src_s":
+                out.append(d[1].src_sentence_id)
+            elif fi == "tgt_s":
+                out.append(d[1].tgt_sentence_id)
+            elif fi == "src_idx":
+                out.append(d[1].src_start_index)
+                out.append(d[1].src_end_index)
+            elif fi == "tgt_idx":
+                out.append(d[1].tgt_start_index)
+                out.append(d[1].tgt_end_index)
+            elif fi == "docid+subdocid":
+                out.append(f"{d.docnum}+{d.subdocument_id}")
+            else:
+                print(f"""No known key for {fi}. Available keys are:
+                            - src : original source sentence
+                            - tgt : original target sentence
+                            - srcurl : source urls
+                            - tgturl : target urls
+                            - docid : numerical id for documents
+                            - subdocid : subdocument id (keeps track of breaking documents)
+                            - collection : original source of data (based on paracrawl divisions)
+                            - src_p : source paragraph ids
+                            - tgt_p : target paragraph ids
+                            - src_s : source sentence ids
+                            - tgt_s : target sentence ids
+                            - src_idx : the start and stop index for source character strings
+                            - tgt_idx : the start and stop index for target character strings""")
+        print("\t".join(out))
+            
+
+
+def main(args):
+
+    if args.outpath is None:
+        ostream = sys.stdout
+    else:
+        ostream = open(args.outpath, 'w')
+        
+    rstream = gzip.open(args.raw_path)
+    rstream = csv.DictReader(rstream,
+                                delimiter='\t',
+                                fieldnames=[
+                                    "srcurl",
+                                    "tgturl",
+                                    "src",
+                                    "tgt",
+                                    "hash_one",
+                                    "hash_two",
+                                    "hash_three",
+                                    "similarity_one",
+                                    "similarity_two",
+                                    "collection"
+                                ])
+
+    mstream = gzip.open(args.metadata_path)
+    mstream = csv.DictReader(mstream,
+                                delimiter='\t',
+                                fieldnames=[
+                                    "src_paragraph_id",
+                                    "src_sentence_id",
+                                    "src_start_index",
+                                    "src_end_index",
+                                    "tgt_paragraph_id",
+                                    "tgt_sentence_id",
+                                    "tgt_start_index",
+                                    "tgt_end_index",
+                                    "frequency"
+                                ])
+
+    docgen = yield_doc(rstream, mstream)
+    for doc in docgen:
+        if meets_requirements(doc, args):
+            print(print_doc(doc), file=ostream)
+    pass
+
+if __name__ == "__main__":
+    parser= argparse.ArgumentParser(description="ParaDocs: Extracts document-level information from RAW ParaCrawl data and filters output for easy bitext extraction.\n"
+        "      Example: paradocs --raw_path en-de.gz --metadata_path en-de.meta.gz --echo src,tgt,docid+sub",
+        usage='%(prog)s [-h] [--raw_path RAW_PATH] [--metadata_path METADATA_PATH] [OPTIONS]',
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("--raw_path", type=str, required=True,
+                                help = "The path to the original paracrawl .gz file (from the RAW version)")
+    parser.add_argument('--metadata_path', type=str, required=True,
+                                help = "The path to the metadata .gz file provided by ParaDocs")
+    parser.add_argument('--minimum_size', type=int, default=1,
+                                help = "The minimum consecutive sequence length to include in the output. By default, set to 1 (all sentences included)")
+    parser.add_argument('--frequency_cutoff', type=int, default=10000,
+                                help = "Will break documents at any line that occurs above this frequency in the original data. This is an alternative to sentence-level deduping.")
+    parser.add_argument("--outpath", type=str, default=None,
+                                help = "The output path to write the data. If not set, defaults to sys.stdout")
+    parser.add_argument("--echo", type=str, default="src,tgt,docid,subdocid,",
+                                help = """What to print. Available keys are:
+                        - src : original source sentence
+                        - tgt : original target sentence
+                        - srcurl : source urls
+                        - tgturl : target urls
+                        - docid : numerical id for documents
+                        - subdocid : subdocument id (keeps track of breaking documents)
+                        - docid+sub: the document id and subdocument id concatenated with a '+' in a single column
+                        - collection : original source of data (based on paracrawl divisions)
+                        - src_p : source paragraph ids
+                        - tgt_p : target paragraph ids
+                        - src_s : source sentence ids
+                        - tgt_s : target sentence ids
+                        - src_idx : the start and stop index for source character strings
+                        - tgt_idx : the start and stop index for target character strings""")
+
+    args = parser.parse_args()
+    main(args)

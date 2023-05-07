@@ -1,0 +1,7 @@
+2023 May 07 Sun 16:14:43 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1267  cd paradocs/
+2023 May 07 Sun 16:14:54 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1268  cp ../../paradocs.py ./
+2023 May 07 Sun 16:15:02 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1269  mv paradocs.py paradocs
+2023 May 07 Sun 16:15:11 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1270  cat ~/bin/moses 
+2023 May 07 Sun 16:15:32 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1271  vim paradocs 
+2023 May 07 Sun 16:15:35 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1272  chmod +x paradocs 
+2023 May 07 Sun 16:15:38 EDT test1 /home/hltcoe/rwicks/document-recovery/scripts/paradocs/paradocs  1273  vim paradocs 
