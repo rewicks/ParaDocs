@@ -1,0 +1,184 @@
+#!/usr/bin/env python
+
+import argparse
+import sys
+import gzip
+import csv
+
+from datasets import load_dataset
+from multiprocessing import Pool, cpu_count
+
+from functools import partial
+
+
+
+csv.field_size_limit(sys.maxsize)
+
+class Document():
+    def __init__(self, docid, docnum, subdocument_id):
+        self.subdocument_id = subdocument_id
+        self.lines = []
+        self.docid = docid
+        self.docnum = docnum
+
+    def add(self, data):
+        self.lines.append(data)
+
+def is_consecutive(preceding, subsequent):
+    try:
+        if int(subsequent["src_start_id"]) - int(preceding["src_end_id"]) <= 2 \
+                    and int(subsequent["tgt_start_id"]) - int(subsequent["tgt_end_id"]) <= 2:
+            return True
+        return False
+    except:
+        breakpoint()
+
+def breaks_document(args, line):
+    if "None" in [ 
+                    line["src_paragraph_id"],
+                    line["src_sentence_id"],
+                    line["src_start_id"],
+                    line["src_end_id"],
+                    line["tgt_paragraph_id"],
+                    line["tgt_sentence_id"],
+                    line["tgt_start_id"],
+                    line["tgt_end_id"],
+                    ]:
+        return True
+    if int(line["duplication_count"]) > args.frequency_cutoff:
+        return True
+    if float(line["src_lid_prob"]) < args.lid_cutoff:
+        return True
+    if float(line["tgt_lid_prob"]) < args.lid_cutoff:
+        return True
+    if len(line["src"].strip()) == 0:
+        return True
+    if len(line["tgt"].strip()) == 0:
+        return True
+    return False
+
+def yield_doc(istream):
+    document = None
+    docnum = 0
+    subdocument_id = 0
+    lastid = None
+    for data in istream:
+        docid = "-".join([data["src_docid"], data["tgt_docid"]])
+        if document is None:
+            if not breaks_document(args, data):
+                document = Document(docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+                document.add(data)
+                lastid = docid
+                docnum += 1
+                subdocument_id += 1
+        elif docid == lastid:
+            if breaks_document(args, data):
+                yield document
+                document = None
+            else:
+                if is_consecutive(document.lines[-1], data):
+                    document.add(data)
+                else:
+                    yield document
+                    document = Document(docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+                    document.add(data)
+                    subdocument_id += 1
+        else:
+            yield document
+            subdocument_id = 0
+            lastid = docid
+            if not breaks_document(args, data):
+                document = Document(docid=docid, docnum=docnum, subdocument_id=subdocument_id)
+                document.add(data)
+                docnum +=1
+                subdocument_id += 1
+            else:
+                document = None
+    yield document
+
+
+def meets_requirements(doc, args):
+    if len(doc.lines) >= args.minimum_size:
+        total = 0
+        for d in doc.lines:
+            try:
+                total += float(d["sim_score_two"])
+            except:
+                print(d, file=sys.stderr)
+        if total / len(doc.lines) >= args.min_avg_score:
+            return True
+    return False
+
+def format_line(inline):
+    out = f'{inline["src"]}'
+    out += f'\t{inline["tgt"]}'
+    out += f'\t{inline["sim_score_one"]}'
+    out += f'\t{inline["sim_score_two"]}'
+    out += f'\t{inline["collection"]}'
+    out += f'\t{inline["src_paragraph_id"]}'
+    out += f'\t{inline["tgt_paragraph_id"]}'
+    out += f'\t{inline["src_sentence_id"]}'
+    out += f'\t{inline["tgt_sentence_id"]}'
+    out += f'\t{inline["src_start_id"]}'
+    out += f'\t{inline["src_end_id"]}'
+    out += f'\t{inline["tgt_start_id"]}'
+    out += f'\t{inline["tgt_end_id"]}'
+    out += f'\t{inline["src_lid_prob"]}'
+    out += f'\t{inline["tgt_lid_prob"]}'
+    out += f'\t{inline["duplication_count"]}'
+    out += f'\t{inline["src_docid"]}'
+    out += f'\t{inline["tgt_docid"]}'
+    return out
+
+def print_doc(doc, ostream):
+    for d in doc.lines:
+        out = f'{doc.docnum:06}+{doc.subdocument_id:03}\t{format_line(d)}'
+        print(out, file=ostream)
+
+def process_doc(args, doc):
+    if meets_requirements(doc, args):
+        return doc
+
+def main(args):
+    if args.outpath is None:
+        ostream = sys.stdout
+    else:
+        ostream = open(args.outpath, 'w')
+
+    istream = load_dataset("rewicks/paradocs", name=args.name, streaming=True, split="train")
+
+    docgen = yield_doc(istream)
+
+    num_processes = 16
+
+    func = partial(process_doc, args)
+
+    with Pool(num_processes) as pool:
+        results = pool.imap(func, docgen)
+
+        for result in results:
+            if result is not None:
+                print_doc(result, ostream=ostream)
+
+
+if __name__ == "__main__":
+    parser= argparse.ArgumentParser(description="ParaDocs: Extracts document-level information from RAW ParaCrawl data and filters output for easy bitext extraction.\n"
+        "      Example: paradocs --name en-de-strict",
+        usage='%(prog)s [-h] [--NAME NAME] [OPTIONS]',
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("--name", type=str, required=True,
+                                help = "The split name to use")
+    parser.add_argument('--minimum_size', type=int, default=2,
+                                help = "The minimum consecutive sequence length to include in the output. By default, set to 1 (all sentences included)")
+    parser.add_argument('--frequency_cutoff', type=int, default=100,
+                                help = "Will break documents at any line that occurs above this duplication count in the original data. This is an alternative to sentence-level deduping.")
+    parser.add_argument("--lid_cutoff", type=float, default=0.5,
+                                help="Will break documents at any line that occurs below this probability for the assigned language.")
+    parser.add_argument("--min_avg_score", type=float, default=0.0,
+                                help="To print out a document, the whole document must maintain an average score across the whole document.")
+    parser.add_argument("--outpath", type=str, default=None,
+                                help = "The output path to write the data. If not set, defaults to sys.stdout")
+
+    args = parser.parse_args()
+    main(args)
